@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.env
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Data files — never commit raw datasets
+# (Allow .gitkeep placeholder files to track empty directories)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+*.csv
+*.parquet
+*.xlsx
+*.json.gz
+
+# Secrets and credentials
+.env
+*.env
+config/secrets.py
+config/credentials.py
+secrets.yml
+secrets.yaml
+*.pem
+*.key
+
+# IDE and OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs and reports
+logs/
+*.log
+reports/
+
+# Test and coverage artifacts
+.coverage
+.pytest_cache/
+htmlcov/
+.tox/
