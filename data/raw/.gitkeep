@@ -1,0 +1,3 @@
+# Place raw dataset files here.
+# This directory is gitignored — do not commit dataset files.
+# See docs/dataset.md for sourcing instructions.
