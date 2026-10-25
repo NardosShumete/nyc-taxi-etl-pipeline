@@ -8,123 +8,164 @@
 --                          validate_trips() function
 --
 -- Requires: PostgreSQL 13 or later (uses GENERATED ALWAYS AS IDENTITY)
--- Compatible with: psycopg2, SQLAlchemy 2.x (Member 3 loading layer)
+-- Compatible with: psycopg2 2.9.9, SQLAlchemy 2.0.x (Member 3 loading layer)
 --
 -- Usage:
 --   psql -U <user> -d nyc_taxi -f sql/create_tables.sql
 --
--- Schema design notes are in docs/database.md
+-- Schema design notes and Member 3 loading instructions: docs/database.md
 -- =============================================================================
 
 
 -- -----------------------------------------------------------------------------
 -- 0.  Database / schema prerequisites
---     Run the commands below once as a superuser before executing this file:
+--     Run the following once as a superuser, then connect to nyc_taxi:
 --
 --       CREATE DATABASE nyc_taxi;
 --       \c nyc_taxi
 --
---     This file should be executed inside the nyc_taxi database.
+--     This file is safe to re-run: all CREATE statements use IF NOT EXISTS.
 -- -----------------------------------------------------------------------------
+
+
+-- =============================================================================
+-- IDENTIFIER CASING STRATEGY
+--
+-- All column names in this schema use lowercase snake_case.
+-- PostgreSQL folds unquoted identifiers to lowercase, so using lowercase
+-- consistently means no identifier ever needs quoting in queries or application
+-- code.
+--
+-- The source DataFrame (produced by src/transform.py) uses mixed-case names
+-- for four columns that come directly from the TLC data dictionary:
+--
+--   DataFrame column   ->   Database column
+--   ─────────────────────────────────────────
+--   VendorID           ->   vendor_id
+--   RatecodeID         ->   ratecode_id
+--   PULocationID       ->   pu_location_id
+--   DOLocationID       ->   do_location_id
+--
+-- Member 3 must apply this rename mapping before calling to_sql().
+-- All other DataFrame columns already match their database column names
+-- exactly.  See docs/database.md Section 9 for the complete rename dict
+-- and loading code.
+-- =============================================================================
 
 
 -- =============================================================================
 -- TABLE: taxi_trips
 --
 -- Stores every row that passes Member 1's validate_trips() quality checks.
--- Column definitions mirror the clean_df column contract declared in the
--- module docstring of src/transform.py, in the same order.
+-- Source: result["clean_df"] from src/transform.py::transform_data().
 --
--- Column sources:
---   Raw TLC source fields: tpep_pickup_datetime, tpep_dropoff_datetime,
---     passenger_count, trip_distance, RatecodeID, store_and_fwd_flag,
---     PULocationID, DOLocationID, payment_type, fare_amount, extra,
---     mta_tax, tip_amount, tolls_amount, total_amount,
---     congestion_surcharge, airport_fee, improvement_surcharge,
---     cbd_congestion_fee, VendorID
---   Publisher-engineered features: speed_mph, duration_min,
---     pickup_hour, day_of_week, is_weekend
+-- ACTUAL COLUMN COUNT: 25 source columns (all columns the CSV contains after
+-- normalize_columns() runs, minus rejection_reason which is dropped for
+-- clean_df).  The transform.py module docstring lists only 19 columns but
+-- transform_data() does not select or drop the additional 6 columns
+-- (vendor_id, improvement_surcharge, cbd_congestion_fee, pickup_hour,
+-- day_of_week, is_weekend).  All 25 are included in the schema here.
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS taxi_trips (
 
     -- -------------------------------------------------------------------------
-    -- Surrogate primary key
-    -- BIGINT covers up to 9.2 × 10^18 rows; safe for the ~3.9 M source rows
-    -- and future reloads.  GENERATED ALWAYS prevents accidental overwrites.
+    -- Surrogate primary key.
+    -- BIGINT covers up to 9.2 × 10^18 rows; safe for ~3.9 M source rows and
+    -- any future reloads.  GENERATED ALWAYS prevents accidental overwrites.
+    -- Member 3 must NOT include trip_id in INSERT statements or to_sql calls.
     -- -------------------------------------------------------------------------
-    trip_id                 BIGINT          GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    trip_id                 BIGINT          GENERATED ALWAYS AS IDENTITY
+                                            PRIMARY KEY,
 
     -- -------------------------------------------------------------------------
-    -- Timestamps
-    -- TIMESTAMP WITHOUT TIME ZONE because all TLC records are implicitly in
-    -- America/New_York local time and storing the offset would require a
-    -- policy decision not yet made by the team.  The range 2007-12-05 through
-    -- 2025-12-01 is fully representable by standard TIMESTAMP.
+    -- Timestamps.
+    -- TIMESTAMP WITHOUT TIME ZONE: all TLC records are in America/New_York
+    -- local time.  No UTC offset is present in the source.  Converting to
+    -- TIMESTAMPTZ requires a team timezone policy decision (see
+    -- docs/database.md Section 11, item 2).
+    -- Verified date range: 2007-12-05 through 2025-12-01 (docs/dataset.md §5).
     -- -------------------------------------------------------------------------
     tpep_pickup_datetime    TIMESTAMP       NOT NULL,
     tpep_dropoff_datetime   TIMESTAMP       NOT NULL,
 
     -- -------------------------------------------------------------------------
-    -- Passenger and distance
+    -- Passenger count.
+    -- Validated range 1–6 by validate_trips() (rule 9).
+    -- Source dtype: Int64 (pandas nullable integer after convert_data_types).
     -- -------------------------------------------------------------------------
     passenger_count         SMALLINT        NOT NULL
                                 CHECK (passenger_count BETWEEN 1 AND 6),
 
+    -- -------------------------------------------------------------------------
+    -- Trip distance (miles).
+    -- Validated > 0 and ≤ 500 by validate_trips() (rule 3).
+    -- NUMERIC(10,4): supports values up to 999,999.9999; 4 decimal places
+    -- for sub-mile precision.
+    -- -------------------------------------------------------------------------
     trip_distance           NUMERIC(10, 4)  NOT NULL
                                 CHECK (trip_distance > 0),
 
     -- -------------------------------------------------------------------------
-    -- Rate code: valid TLC values are 1–6 and 99 (Unknown).
+    -- Rate code.
+    -- DataFrame column name: RatecodeID  ->  DB column: ratecode_id
+    -- Valid TLC values: 1–6 and 99 (Unknown).  Validated by rule 10.
     -- SMALLINT is sufficient (max value 99).
     -- -------------------------------------------------------------------------
-    "RatecodeID"            SMALLINT        NOT NULL
-                                CHECK ("RatecodeID" IN (1, 2, 3, 4, 5, 6, 99)),
+    ratecode_id             SMALLINT        NOT NULL
+                                CHECK (ratecode_id IN (1, 2, 3, 4, 5, 6, 99)),
 
     -- -------------------------------------------------------------------------
-    -- Store-and-forward flag: 'Y' or 'N' (CHAR(1)).
+    -- Store-and-forward flag.
+    -- Values normalised to 'Y' or 'N' by convert_data_types().
+    -- CHAR(1) is exact; CHECK constraint enforces the two valid values.
     -- -------------------------------------------------------------------------
     store_and_fwd_flag      CHAR(1)         NOT NULL
                                 CHECK (store_and_fwd_flag IN ('Y', 'N')),
 
     -- -------------------------------------------------------------------------
-    -- Location IDs: TLC zone range 1–265.
-    -- SMALLINT covers the range (max 32767).
+    -- Location IDs.
+    -- DataFrame column names: PULocationID, DOLocationID
+    -- ->  DB columns: pu_location_id, do_location_id
+    -- TLC zone range 1–265.  Validated by rule 12.
+    -- SMALLINT covers the range (max value 32,767).
     -- -------------------------------------------------------------------------
-    "PULocationID"          SMALLINT        NOT NULL
-                                CHECK ("PULocationID" BETWEEN 1 AND 265),
+    pu_location_id          SMALLINT        NOT NULL
+                                CHECK (pu_location_id BETWEEN 1 AND 265),
 
-    "DOLocationID"          SMALLINT        NOT NULL
-                                CHECK ("DOLocationID" BETWEEN 1 AND 265),
+    do_location_id          SMALLINT        NOT NULL
+                                CHECK (do_location_id BETWEEN 1 AND 265),
 
     -- -------------------------------------------------------------------------
-    -- Payment type: TLC codes 1–6.
+    -- Payment type: TLC codes 1–6.  Validated by rule 11.
     -- -------------------------------------------------------------------------
     payment_type            SMALLINT        NOT NULL
                                 CHECK (payment_type BETWEEN 1 AND 6),
 
     -- -------------------------------------------------------------------------
-    -- Financial columns
-    -- NUMERIC(12, 2) stores values up to 9,999,999,999.99 — adequate for all
-    -- validated trip amounts (max fare $10 k, max total $15 k).
+    -- Financial columns.
+    -- NUMERIC(12,2): exact decimal arithmetic, no floating-point rounding.
+    -- Supports values up to 9,999,999,999.99 — well above the validated
+    -- maximums ($10,000 fare, $15,000 total).
     --
-    -- fare_amount: validated ≥ 0 and ≤ $10,000 by Member 1.
-    -- extra, mta_tax, cbd_congestion_fee: negative values are permitted
-    --   because they represent legitimate correction records (documented in
-    --   docs/dataset.md Section 9 and Section 10 item 4).
-    -- tip_amount:  validated ≥ 0 by Member 1.
+    -- fare_amount:            validated ≥ 0 by rule 6.
+    -- tip_amount:             validated ≥ 0 by rule 8.
+    -- extra, mta_tax,
+    -- cbd_congestion_fee:     negative values PERMITTED — they represent
+    --                         legitimate correction entries (docs/dataset.md §9).
     -- tolls_amount, total_amount, congestion_surcharge,
-    --   improvement_surcharge: expected non-negative in practice but no
-    --   hard constraint applied at DB level to allow correction rows.
-    -- airport_fee: NULLABLE — 19.19% of source rows have no airport fee
-    --   because the trip did not involve an airport pickup.
+    -- improvement_surcharge:  no lower-bound constraint — correction records
+    --                         are accepted at the application layer.
+    -- airport_fee:            NULLABLE — 757,387 rows (19.19%) have no
+    --                         airport fee because the trip did not originate
+    --                         at an airport (docs/dataset.md §9, §10 item 2).
     -- -------------------------------------------------------------------------
     fare_amount             NUMERIC(12, 2)  NOT NULL
                                 CHECK (fare_amount >= 0),
 
-    extra                   NUMERIC(12, 2)  NOT NULL,   -- can be negative (corrections)
+    extra                   NUMERIC(12, 2)  NOT NULL,
 
-    mta_tax                 NUMERIC(12, 2)  NOT NULL,   -- can be negative (corrections)
+    mta_tax                 NUMERIC(12, 2)  NOT NULL,
 
     tip_amount              NUMERIC(12, 2)  NOT NULL
                                 CHECK (tip_amount >= 0),
@@ -137,26 +178,29 @@ CREATE TABLE IF NOT EXISTS taxi_trips (
 
     congestion_surcharge    NUMERIC(12, 2)  NOT NULL,
 
-    airport_fee             NUMERIC(12, 2)  NULL,       -- nullable: 19.19% missing (non-airport trips)
+    airport_fee             NUMERIC(12, 2)  NULL,
 
-    cbd_congestion_fee      NUMERIC(12, 2)  NOT NULL,   -- can be negative (corrections)
-
-    -- -------------------------------------------------------------------------
-    -- Vendor ID: 1 = Creative Mobile Technologies, 2 = VeriFone.
-    -- Included per dataset; SMALLINT sufficient.
-    -- -------------------------------------------------------------------------
-    "VendorID"              SMALLINT        NOT NULL,
+    cbd_congestion_fee      NUMERIC(12, 2)  NOT NULL,
 
     -- -------------------------------------------------------------------------
-    -- Publisher-engineered features
-    -- speed_mph: validated 0 < x ≤ 100 by Member 1; NUMERIC(8,4) stores
-    --   values like 72.3456 without float rounding.
-    -- duration_min: validated > 0 and ≤ 1440 (24 h); NUMERIC(10,4) handles
-    --   sub-minute precision (e.g. 1.5033 minutes).
-    -- pickup_hour: 0–23; SMALLINT.
-    -- day_of_week: full day name string, max 9 chars ("Wednesday");
-    --   VARCHAR(9) is exact.
-    -- is_weekend: BOOLEAN.
+    -- Vendor ID.
+    -- DataFrame column name: VendorID  ->  DB column: vendor_id
+    -- 1 = Creative Mobile Technologies, 2 = VeriFone.
+    -- SMALLINT sufficient (values 1–2).
+    -- -------------------------------------------------------------------------
+    vendor_id               SMALLINT        NOT NULL,
+
+    -- -------------------------------------------------------------------------
+    -- Publisher-engineered features.
+    --
+    -- speed_mph:    validated 0 < x ≤ 100 by rules 4 and 5.
+    --               NUMERIC(8,4): stores values like 72.3456 precisely.
+    -- duration_min: validated 0 < x ≤ 1,440 (24 h) by rule 14.
+    --               NUMERIC(10,4): handles sub-minute precision.
+    -- pickup_hour:  range 0–23; SMALLINT.
+    -- day_of_week:  full day name; longest is "Wednesday" (9 chars).
+    --               VARCHAR(9) is exact; CHECK enforces all 7 valid names.
+    -- is_weekend:   BOOLEAN, derived from pickup date.
     -- -------------------------------------------------------------------------
     speed_mph               NUMERIC(8, 4)   NOT NULL
                                 CHECK (speed_mph > 0),
@@ -181,76 +225,72 @@ CREATE TABLE IF NOT EXISTS taxi_trips (
 -- =============================================================================
 -- INDEXES on taxi_trips
 --
--- Three targeted indexes justified by likely query patterns:
+-- Three targeted indexes, one per high-value query pattern.
+-- Deliberately limited: bulk-loading 3.9 M rows with many indexes is
+-- noticeably slower.  Additional indexes can be added after the initial
+-- load with CREATE INDEX CONCURRENTLY.
 --
---  1. idx_taxi_trips_pickup_dt
---     Supports time-range queries (date filters, yearly groupings, min/max
---     lookups).  Verification query 6 (trip counts by year) uses this.
---     Pickup datetime is the most common filter in taxi analytics.
+-- 1. idx_taxi_trips_pickup_dt
+--    Time-range queries, yearly groupings, MIN/MAX scans.
+--    Used by verification_queries.sql Sections 2, 6.
 --
---  2. idx_taxi_trips_pu_location
---     Supports WHERE / GROUP BY on pickup zone — common in zone-level
---     aggregations that Member 3 or analysts will run.
+-- 2. idx_taxi_trips_pu_location
+--    Pickup-zone aggregations — the most common analytical grouping.
 --
---  3. idx_taxi_trips_do_location
---     Same reasoning as above for drop-off zone.
---
--- We deliberately skip indexes on payment_type, RatecodeID, and financial
--- columns at this stage: bulk loading 3.9 M rows with many indexes is
--- materially slower, and those columns are low-cardinality or rarely used
--- as selective filters.  Indexes can be added after initial load with
--- CREATE INDEX CONCURRENTLY if query profiling shows they help.
+-- 3. idx_taxi_trips_do_location
+--    Drop-off zone aggregations.
 -- =============================================================================
 
 CREATE INDEX IF NOT EXISTS idx_taxi_trips_pickup_dt
     ON taxi_trips (tpep_pickup_datetime);
 
 CREATE INDEX IF NOT EXISTS idx_taxi_trips_pu_location
-    ON taxi_trips ("PULocationID");
+    ON taxi_trips (pu_location_id);
 
 CREATE INDEX IF NOT EXISTS idx_taxi_trips_do_location
-    ON taxi_trips ("DOLocationID");
+    ON taxi_trips (do_location_id);
 
 
 -- =============================================================================
 -- TABLE: rejected_taxi_trips
 --
 -- Audit table for rows that failed Member 1's validate_trips() checks.
--- Mirrors the raw source columns (pre-validation) plus a rejection_reason
--- column sourced directly from the rejected_df returned by transform_data().
+-- Populated from result["rejected_df"] returned by transform_data().
 --
--- Member 1 return contract (src/transform.py, transform_data docstring):
---   result["rejected_df"] contains all original columns plus
---   "rejection_reason" (str).
+-- rejected_df structure (src/transform.py):
+--   All 25 source columns (after normalize_columns + convert_data_types)
+--   PLUS a "rejection_reason" column (str, never None for rejected rows).
 --
 -- Design decisions:
---   - All source value columns are typed permissively (TEXT for string-like,
---     NUMERIC for numbers, TIMESTAMP for datetimes) to accept values that
---     failed validation — e.g. a fare of -999.99 cannot go into taxi_trips
---     but must be storable here for audit.
+--   - Datetime columns are stored as TEXT to survive values like 'NaT'
+--     that cannot be cast to TIMESTAMP.
+--   - All numeric columns use NUMERIC (no precision limit) to accept values
+--     that violated the strict constraints in taxi_trips — e.g. a fare of
+--     -999.99 cannot go into taxi_trips but must be auditable here.
+--   - Mixed-case DataFrame column names are also lowercased here:
+--       VendorID   -> vendor_id
+--       RatecodeID -> ratecode_id
+--       PULocationID -> pu_location_id
+--       DOLocationID -> do_location_id
 --   - rejection_reason is NOT NULL: every row in rejected_df has one.
---   - rejected_at records the server timestamp of insertion for traceability.
+--   - rejected_at records the server timestamp of insertion.
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS rejected_taxi_trips (
 
-    rejected_id             BIGINT          GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    rejected_id             BIGINT          GENERATED ALWAYS AS IDENTITY
+                                            PRIMARY KEY,
 
-    -- Source timestamps stored as TEXT to preserve malformed values (e.g. a
-    -- NaT that cannot be cast to TIMESTAMP is stored as the string 'NaT').
     tpep_pickup_datetime    TEXT,
     tpep_dropoff_datetime   TEXT,
 
-    -- Numeric source columns stored as NUMERIC with generous precision.
-    -- NULL is allowed because the rejection may have been caused by a missing
-    -- value in one of these columns.
-    "VendorID"              NUMERIC,
+    vendor_id               NUMERIC,
     passenger_count         NUMERIC,
     trip_distance           NUMERIC,
-    "RatecodeID"            NUMERIC,
+    ratecode_id             NUMERIC,
     store_and_fwd_flag      TEXT,
-    "PULocationID"          NUMERIC,
-    "DOLocationID"          NUMERIC,
+    pu_location_id          NUMERIC,
+    do_location_id          NUMERIC,
     payment_type            NUMERIC,
     fare_amount             NUMERIC,
     extra                   NUMERIC,
@@ -266,9 +306,8 @@ CREATE TABLE IF NOT EXISTS rejected_taxi_trips (
     duration_min            NUMERIC,
     pickup_hour             NUMERIC,
     day_of_week             TEXT,
-    is_weekend              TEXT,           -- stored as text since source may be non-boolean
+    is_weekend              TEXT,
 
-    -- Audit metadata
     rejection_reason        TEXT            NOT NULL,
     rejected_at             TIMESTAMP       NOT NULL DEFAULT NOW()
 
