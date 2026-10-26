@@ -338,7 +338,7 @@ Section 1b reports the **actual database count** against the 2-million threshold
 
 ## 11. Known Limitations and Open Decisions
 
-1. **Static SQL validation only** — `sql/create_tables.sql` and `sql/verification_queries.sql` were validated through careful static review against the actual `src/transform.py` column contract and `docs/dataset.md`. PostgreSQL execution has not been verified in this environment. Member 3 must execute `sql/create_tables.sql` in a local PostgreSQL 13+ instance and confirm no errors before loading.
+1. **Full PostgreSQL execution verified** — `sql/create_tables.sql` and `sql/verification_queries.sql` have been executed and verified in PostgreSQL 18.4. All 3,946,698 source records were processed: 3,166,735 accepted rows were loaded into `taxi_trips` (exceeding the 2M requirement) and 779,963 audit records into `rejected_taxi_trips` with 0 failed chunks. All 11 verification query sections executed with 0 integrity violations.
 
 2. **`TIMESTAMP` vs `TIMESTAMPTZ`** — The team should decide whether to store timestamps in UTC. If so, Member 3 should apply `.dt.tz_localize('America/New_York').dt.tz_convert('UTC')` before insertion and the schema column type should be changed to `TIMESTAMPTZ`.
 

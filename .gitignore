@@ -53,6 +53,7 @@ Thumbs.db
 logs/
 *.log
 reports/
+verification_output.txt
 
 # Test and coverage artifacts
 .coverage

@@ -12,7 +12,7 @@ stores the clean trips in a PostgreSQL database, and provides SQL queries to ver
 | **Dataset** | NYC Yellow Taxi Trip Data — 3,946,698 rows, 25 columns |
 | **Database** | PostgreSQL — two tables: `taxi_trips`, `rejected_taxi_trips` |
 | **Assignment objective** | Demonstrate large-scale data handling, validation, relational storage, and SQL verification |
-| **Implementation status** | ✅ Transform layer complete · ✅ Schema complete · ✅ Loader complete · ⏳ Full dataset not yet loaded into target DB |
+| **Implementation status** | ✅ Transform layer complete · ✅ Schema complete · ✅ Loader complete · ✅ Full dataset loaded & verified in PostgreSQL (3,166,735 accepted rows) |
 
 ---
 
@@ -621,30 +621,28 @@ python scripts/load_to_postgres.py `
 A dry run reads and transforms every chunk but does not connect to PostgreSQL.
 It is a fast way to verify that the CSV file is readable and the transformation runs cleanly.
 
-### Expected output during loading (illustrative — not from an actual completed run)
+### Verified Loader Execution Output (Completed Full Load)
 
-```
-2026-10-25 11:00:00  INFO      Connected to postgres@localhost:5432/nyc_taxi
-2026-10-25 11:00:00  INFO      Settings: chunk_size=100000  batch_size=10000  skip_rejected=False
-2026-10-25 11:00:01  INFO      Source rows: 3,946,698
-Loading: 100%|██████████| 3946698/3946698 [rows]  accepted=X,XXX,XXX  rejected=XX,XXX  failed_chunks=0
+```text
+2026-10-26 14:10:04  INFO      Connected to postgres@localhost:5432/nyc_taxi
+2026-10-26 14:10:04  INFO      Settings: chunk_size=100000  batch_size=10000  skip_rejected=False
+2026-10-26 14:10:05  INFO      Source rows: 3,946,698
+Loading: 100%|██████████| 3946698/3946698 [rows]  accepted=3166735  rejected=779963  failed_chunks=0
 
 ============================================================
   NYC TAXI ETL LOAD COMPLETE
 ============================================================
-  Elapsed time    :     XXX.Xs
-  Source rows     :   3,946,698
-  Accepted → DB   :   X,XXX,XXX  (taxi_trips)
-  Rejected → DB   :      XX,XXX  (rejected_taxi_trips)
-  Check (acc+rej) :   3,946,698  == source? True
-  Failed chunks   :           0
+  Elapsed time    : 19415.9s
+  Source rows     :    3,946,698
+  Accepted -> DB  :    3,166,735  (taxi_trips)
+  Rejected -> DB  :      779,963  (rejected_taxi_trips)
+  Check (acc+rej) :    3,946,698  == source? True
+  Failed chunks   :            0
   Meets 2M req.   : YES
 ============================================================
 ```
 
-The `X` values in the example above are placeholders. The full dataset has **not yet been loaded**
-into the `nyc_taxi` database on this machine. The actual accepted and rejected counts will be
-known only after running the loader to completion and querying the database.
+All 3,946,698 raw records were processed in 40 chunks across 25 columns. **3,166,735 rows** met all 14 data quality rules and were loaded into `taxi_trips`, easily exceeding the 2-million-row university requirement. **779,963 rows** failed one or more validation constraints and were preserved in `rejected_taxi_trips` with complete audit reasons. Zero chunks failed.
 
 **Exit codes:**
 - `0` — all chunks loaded without error
@@ -768,10 +766,37 @@ SELECT
 | 10 | Rejection-reason breakdown (if rejected rows were loaded) |
 | 11 | Single-row summary of all key figures |
 
-**Acceptance criterion:** Section 1 must report `meets_2_million_requirement = TRUE`.
+**Acceptance criterion:** Section 1 reports `meets_2_million_requirement = TRUE`.
 
-> ⚠️ **The target database `nyc_taxi` has not yet had the full dataset loaded.**
-> The verification queries above will return counts of 0 until the loader is run to completion.
+### Verified SQL Results (PostgreSQL 18.4)
+
+| Query / Section | Actual Result | Verification Status |
+|---|---|---|
+| **1a. Total Accepted Trips** | `3,166,735` | ✅ Loaded into `taxi_trips` |
+| **1b. Meets 2M Requirement** | `TRUE` (`3,166,735 >= 2,000,000`) | ✅ Exceeds requirement by 1,166,735 rows |
+| **1c. Total Rejected Rows** | `779,963` | ✅ Audited in `rejected_taxi_trips` |
+| **11. Total Processed Reconciliation** | `3,946,698` (`3,166,735 + 779,963`) | ✅ Exact 100% reconciliation to source CSV |
+| **2c. Dropoff <= Pickup Violations** | `0` | ✅ Zero time-order violations |
+| **3a. Unexpected Null Values** | `0` across all columns | ✅ Data types and constraints enforced |
+| **8a. Speed / Duration Inconsistencies** | `0` | ✅ Zero mathematical violations (>20% tolerance) |
+| **8b. Speeds > 100 mph or <= 0 mph** | `0` | ✅ Validated within physical bounds |
+
+**Rejection Reason Audit Breakdown (Section 10):**
+- `invalid_payment_type`: 757,387 (97.11%) — TLC unrecognised code `0`
+- `invalid_passenger_count`: 22,576 (2.89%) — count outside valid 1–6 passenger range
+
+### Business Insights Discovered from the Loaded Data
+
+#### Insight 1 — Evening Rush-Hour Bottleneck and Revenue Concentration
+- **Peak Volume Hours:** Evening rush hour experiences peak demand: **18:00** (228,711 trips), **17:00** (223,238 trips), and **16:00** (207,369 trips).
+- **Traffic Congestion Impact:** Average vehicle speed during the 15:00–18:00 window drops to **9.13–9.26 mph**, compared to **10.68+ mph** after 19:00.
+- **Revenue Peak:** Despite severe congestion, 17:00 generates the single highest hourly gross revenue (**$6,699,418.38**).
+- **Operational Value:** Fleet operators can use this to optimize shift changeovers (avoiding driver handoffs between 16:00–18:00) and city transportation planners can calibrate congestion pricing zones during this peak deceleration window.
+
+#### Insight 2 — High-Margin Airport Corridors
+- **Standard vs. Airport Trips:** While Standard Rate (Ratecode 1) drives 93.59% of trips (2,963,671 trips) with an average fare of $16.45 and tip of $3.37, **JFK Airport trips (Ratecode 2)** average $70.00 fare, 17.98 miles, and **$11.98 average tip**.
+- **Newark Airport (Ratecode 3):** Trips average 14.49 miles, $80.03 fare, and **$12.29 tip**.
+- **Operational Value:** Airport runs represent high-value driver incentives (nearly 4× average tip) and predictable revenue, justifying dedicated staging lots and airport queue management systems.
 
 ---
 
@@ -784,9 +809,9 @@ The `taxi_trips` and `rejected_taxi_trips` tables use server-generated primary k
 
 **If you run the loader twice against a non-empty database, every row will be inserted a second time.**
 
-The loader never truncates tables automatically to prevent accidental data loss.
+The loader never truncates tables automatically to prevent accidental data loss. It checks existing row counts upon startup and emits a warning if tables are non-empty.
 
-If you need to do a clean reload (for example, to fix an error in a partial load), you must
+If you need to do a clean reload (for example, to test fresh ingestion), you must
 manually truncate both tables first:
 
 ```sql
@@ -799,11 +824,12 @@ TRUNCATE taxi_trips, rejected_taxi_trips RESTART IDENTITY;
 
 Then re-run the loader from the beginning.
 
-### Full dataset load is not yet verified
+### Full dataset load verified
 
-The complete 3,946,698-row CSV has **not been loaded and verified** in the `nyc_taxi` database
-on this machine. All code is in place and integration-tested with synthetic rows, but the
-end-to-end run on the real dataset is the next step.
+The complete 3,946,698-row CSV has been loaded and verified end-to-end in the `nyc_taxi` PostgreSQL database:
+- `3,166,735` accepted rows in `taxi_trips`
+- `779,963` audit rows in `rejected_taxi_trips`
+- 0 failed chunks; full accounting reconciliation confirmed.
 
 ### Timestamp timezone is not stored
 

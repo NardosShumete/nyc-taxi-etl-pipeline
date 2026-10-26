@@ -131,11 +131,11 @@ def _parse_args(argv=None) -> argparse.Namespace:
         "--input", required=True, metavar="CSV_PATH",
         help="Path to the source CSV file.",
     )
-    p.add_argument("--host",     default=os.getenv("DB_HOST",     "localhost"))
-    p.add_argument("--port",     default=os.getenv("DB_PORT",     "5432"),     type=int)
-    p.add_argument("--dbname",   default=os.getenv("DB_NAME",     "nyc_taxi"))
-    p.add_argument("--user",     default=os.getenv("DB_USER",     "postgres"))
-    p.add_argument("--password", default=os.getenv("DB_PASSWORD", ""))
+    p.add_argument("--host",     default=os.getenv("DB_HOST",     os.getenv("PGHOST",     "localhost")))
+    p.add_argument("--port",     default=int(os.getenv("DB_PORT", os.getenv("PGPORT",     "5432"))),     type=int)
+    p.add_argument("--dbname",   default=os.getenv("DB_NAME",     os.getenv("PGDATABASE", "nyc_taxi")))
+    p.add_argument("--user",     default=os.getenv("DB_USER",     os.getenv("PGUSER",     "postgres")))
+    p.add_argument("--password", default=os.getenv("DB_PASSWORD", os.getenv("PGPASSWORD", "")))
     p.add_argument(
         "--chunk-size", dest="chunk_size", default=100_000, type=int,
         help="Rows per CSV read chunk.",
@@ -189,6 +189,20 @@ def _check_tables_exist(engine) -> None:
             f"Required tables not found: {missing}. "
             "Run: psql -U <user> -d nyc_taxi -f sql/create_tables.sql"
         )
+
+
+def _get_table_counts(engine) -> tuple[int, int]:
+    """Return (n_accepted, n_rejected) currently in target tables, or (0, 0) on failure/mock."""
+    try:
+        with engine.connect() as conn:
+            n_acc = conn.execute(text("SELECT COUNT(*) FROM taxi_trips")).scalar()
+            n_rej = conn.execute(text("SELECT COUNT(*) FROM rejected_taxi_trips")).scalar()
+            return (
+                int(n_acc) if isinstance(n_acc, (int, float)) and not isinstance(n_acc, bool) else 0,
+                int(n_rej) if isinstance(n_rej, (int, float)) and not isinstance(n_rej, bool) else 0,
+            )
+    except Exception:
+        return 0, 0
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +357,16 @@ def run(argv=None) -> int:
         args.chunk_size, args.batch_size, args.skip_rejected,
     )
 
+    # Warn if tables already contain data
+    n_existing_acc, n_existing_rej = _get_table_counts(engine)
+    if n_existing_acc > 0 or n_existing_rej > 0:
+        logger.warning(
+            "Target tables already contain data (taxi_trips: %d, rejected_taxi_trips: %d). "
+            "Rerunning will append rows and insert duplicates unless tables are truncated first:\n"
+            "    psql -U %s -d %s -c \"TRUNCATE taxi_trips, rejected_taxi_trips RESTART IDENTITY;\"",
+            n_existing_acc, n_existing_rej, args.user, args.dbname,
+        )
+
     # Count total rows for progress bar (fast row count from file size heuristic)
     # Read actual count by counting lines minus header
     logger.info("Counting source rows (scanning file header)...")
@@ -359,8 +383,6 @@ def run(argv=None) -> int:
     failed_chunks   = 0
     t_start         = time.perf_counter()
     chunk_num       = 0
-
-    estimated_chunks = max(1, total_source_rows // args.chunk_size + 1) if total_source_rows else None
 
     with tqdm(
         total=total_source_rows or None,
@@ -388,8 +410,6 @@ def run(argv=None) -> int:
 
             clean_df    = result["clean_df"]
             rejected_df = result["rejected_df"]
-            n_clean     = result["summary"]["n_clean"]
-            n_rejected  = result["summary"]["n_rejected"]
 
             # Insert
             try:
@@ -404,9 +424,7 @@ def run(argv=None) -> int:
                 )
                 failed_chunks += 1
                 pbar.update(n_in_chunk)
-                total_input    += n_in_chunk
-                total_accepted += 0
-                total_rejected += 0
+                total_input += n_in_chunk
                 continue
 
             total_input    += n_in_chunk
@@ -429,8 +447,8 @@ def run(argv=None) -> int:
     print("=" * 60)
     print(f"  Elapsed time    : {elapsed:.1f}s")
     print(f"  Source rows     : {total_input:>12,}")
-    print(f"  Accepted → DB   : {total_accepted:>12,}  (taxi_trips)")
-    print(f"  Rejected → DB   : {total_rejected:>12,}  (rejected_taxi_trips)")
+    print(f"  Accepted -> DB   : {total_accepted:>12,}  (taxi_trips)")
+    print(f"  Rejected -> DB   : {total_rejected:>12,}  (rejected_taxi_trips)")
     print(f"  Check (acc+rej) : {total_accepted + total_rejected:>12,}  == source? {total_accepted + total_rejected == total_input}")
     print(f"  Failed chunks   : {failed_chunks:>12}")
     print(f"  Meets 2M req.   : {'YES' if total_accepted >= 2_000_000 else 'NO (run verification SQL)'}")

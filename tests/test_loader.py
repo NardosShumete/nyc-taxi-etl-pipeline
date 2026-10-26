@@ -647,6 +647,17 @@ class TestPostgresIntegration:
             "FROM taxi_trips ORDER BY trip_id DESC LIMIT 1",
             test_db_engine,
         )
+        if len(rows) == 0:
+            result = transform_data(pd.DataFrame([VALID_ROW.copy()]))
+            _insert_chunk(
+                test_db_engine, result["clean_df"],
+                result["rejected_df"], batch_size=1000, skip_rejected=True,
+            )
+            rows = pd.read_sql(
+                "SELECT vendor_id, ratecode_id, pu_location_id, do_location_id "
+                "FROM taxi_trips ORDER BY trip_id DESC LIMIT 1",
+                test_db_engine,
+            )
         assert len(rows) == 1
         assert int(rows["vendor_id"].iloc[0])      == 1
         assert int(rows["ratecode_id"].iloc[0])    == 1

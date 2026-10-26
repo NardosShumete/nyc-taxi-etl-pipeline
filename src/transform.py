@@ -37,9 +37,7 @@ Member 3 integration note:
 """
 
 import logging
-from typing import Optional
 
-import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
