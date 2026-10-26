@@ -6,16 +6,6 @@ A group project implementing a simple data pipeline and ETL (Extract, Transform,
 
 ---
 
-## Group Responsibilities
-
-| Member | Role |
-|--------|------|
-| **Member 1** | Dataset Inspection, Data Quality Validation, Pandas Transformations |
-| **Member 2** | PostgreSQL Database Schema Design |
-| **Member 3** | Extraction, Loading, and Pipeline Integration |
-
----
-
 ## Project Structure
 
 ```
